@@ -71,9 +71,9 @@ int main(void)
 //	print_sizes();
 	print("Initializing tasks...\r\n");
 
-	OS_newTask("Periodic 1", proc_emitter, (void*)100, 1);
-	OS_newTask("Periodic 2", proc_emitter, (void*)200, 1);
-	OS_newTask("Handler", proc_handler, (void*)200, 3);
+	OS_newTask(proc_emitter, (void*)100, 1024, 1, "Periodic 1");
+	OS_newTask(proc_emitter, (void*)200, 1024, 1, "Periodic 2");
+	OS_newTask(proc_handler, (void*)300, 1024, 3, "Handler");
 	semaphore=OS_createSemaphore();
 
 	OS_startScheduler(0x03FFFF, idleHook);

@@ -10,12 +10,12 @@ void* acme_memset(void *dst, unsigned val, unsigned size)
 	unsigned aa1=(a1&~(unit-1))+(((a1&(unit-1))!=0)<<2)+unit, aa2=a2&~(unit-1);
 	if(a2<aa1)
 	{
-		for(;a1<<a2;++a1)
+		for(;a1<a2;++a1)
 			*(unsigned char*)a1=val;
 	}
 	else
 	{
-		for(;a1<<aa1;++a1)
+		for(;a1<aa1;++a1)
 			*(unsigned char*)a1=val;
 		unsigned temp=*(unsigned*)(aa1-unit);
 		for(;aa1<aa2;aa1+=unit)
@@ -95,9 +95,11 @@ int print_idec(int n)
 		n/=10;
 	}
 	while(n);
-	for(int k=idx;k>=0;--k)//reverse
+	for(int k=idx-1;k>=0;--k)//reverse
 		print_char(buf[k]);
 	printed+=idx;
+	if(!printed)
+		print_char('0'), ++printed;
 	return printed;
 }
 int print_ihex(unsigned n)
@@ -176,6 +178,191 @@ void print_memory(const char *header, const void *start, const void *end, int wi
 }
 
 
+//dynamic memory allocation
+typedef struct MemBlockStruct
+{
+	unsigned start, end;
+} MemBlock;
+static unsigned char memheap[HEAP_BYTES]={0};//in the ROM?
+static int nallocs=0, atomic_counter=0;//count of alllocated blocks
+static void print_allocs()//prints the contents of allocations array
+{
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+	print("Allocations:\n");
+	for(int k=0;k<nallocs;++k)
+	{
+		print_idec(k);
+		print(": ");
+		print_ihex((unsigned)memheap);
+		print(" + ");
+		print_idec(blocks[k].start);
+		print("~");
+		print_idec(blocks[k].end);
+		print("\t = ");
+		print_ihex((unsigned)memheap+blocks[k].start);//shows alignment
+		print("~");
+		print_ihex((unsigned)memheap+blocks[k].end);
+		print("\n");
+	}
+	print("\n");
+}
+static void interrupt_disable()
+{
+	if(!atomic_counter)
+		asm("cpsid i");
+	++atomic_counter;
+}
+static void interrupt_enable()
+{
+	--atomic_counter;
+	if(!atomic_counter)
+		asm("cpsie i");
+}
+static unsigned align_int_up(unsigned val, unsigned align)
+{
+	unsigned rem=val%align;
+	if(rem)
+		val+=align-rem;
+	return val;
+}
+#define align_ptr_up(PTR, ALIGN)	(void*)align_int_up((unsigned)(PTR), ALIGN)
+static int find_best_gap(unsigned size, unsigned align)//returns insertioned block idx
+{
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+	ceiling-=sizeof(MemBlock);//make way for allocation entry
+	if(nallocs>0&&blocks[nallocs-1].end>ceiling)//can't expand heap array
+		return -1;
+	int kbest=-1, bestgapsize=0;
+	unsigned base=(unsigned)memheap;
+	for(int k=-1;k<nallocs;++k)	//find best gap between allocations
+	{
+		unsigned start=align_int_up(base+(k>=0?blocks[k].end:0), align)-base;
+		unsigned end=k+1<nallocs?blocks[k+1].start:ceiling;
+		unsigned gapsize=end-start;
+		if(start<end&&gapsize>=size)
+		{
+			if(kbest==-1||bestgapsize>gapsize)
+				kbest=k+1, bestgapsize=gapsize;
+		}
+	}
+	return kbest;
+}
+void*	acme_malloc(unsigned size, unsigned align)
+{
+	if(!size)
+		return 0;
+	interrupt_disable();
+//#ifdef PRINT_ALLOCS
+//	print_allocs();
+//#endif
+	unsigned base=(unsigned)memheap;
+	unsigned ceiling=HEAP_BYTES-(nallocs+1)*sizeof(MemBlock);//make way for allocation entry
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+	int kbest=find_best_gap(size, align);
+	if(kbest==-1)//malloc failed
+	{
+		interrupt_enable();
+		return 0;
+	}
+	memmove(blocks, blocks+1, kbest*sizeof(MemBlock));
+	++nallocs;
+	unsigned start=kbest?blocks[kbest-1].end:0;
+	blocks[kbest].start=align_int_up(base+start, align)-base;
+	blocks[kbest].end=blocks[kbest].start+size;
+	void *ptr=memheap+blocks[kbest].start;
+#ifdef PRINT_ALLOCS
+	print_allocs();
+#endif
+	interrupt_enable();
+	return ptr;
+}
+static int acme_blockidx(void *ptr)
+{
+	unsigned start=(unsigned char*)ptr-memheap;
+	
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+	
+	int L=0, R=nallocs-1;
+	while(L<=R)
+	{
+		int M=(L+R)>>1;
+		if(blocks[M].start<start)
+			L=M+1;
+		else if(blocks[M].start>start)
+			R=M-1;
+		else
+			return M;
+	}
+	return -1;
+}
+void acme_free(void *ptr)
+{
+	if(!ptr)
+		return;
+	interrupt_disable();
+//#ifdef PRINT_ALLOCS
+//	print_allocs();
+//#endif
+	int idx=acme_blockidx(ptr);
+	memmove(
+		memheap+HEAP_BYTES-(nallocs-1)*sizeof(MemBlock),
+		memheap+HEAP_BYTES-nallocs*sizeof(MemBlock),
+		idx*sizeof(MemBlock));
+	--nallocs;
+#ifdef PRINT_ALLOCS
+	print_allocs();
+#endif
+	interrupt_enable();
+}
+void* acme_realloc(void *ptr, unsigned size, unsigned align)
+{
+	if(!ptr)
+		return acme_malloc(size, align);
+	int idx=acme_blockidx(ptr);
+	if(idx==-1)//realloc failed
+		return 0;
+
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+
+	unsigned end=idx+1<nallocs?blocks[idx+1].start:ceiling;
+	if(blocks[idx].start+size<=end)//shrink, or there is enough free memory after current block
+	{
+		interrupt_disable();
+		blocks[idx].end=blocks[idx].start+size;
+#ifdef PRINT_ALLOCS
+		print_allocs();
+#endif
+		interrupt_enable();
+		return ptr;
+	}
+
+	interrupt_disable();
+	unsigned start0=blocks[idx].start, end0=blocks[idx].end;
+	acme_free(ptr);//ENABLES INTERRUPTS
+	ptr=acme_malloc(size, align);
+	unsigned size0=end0-start0;
+	unsigned movesize=size>=size0?size0:size;
+	memmove(ptr, memheap+start0, movesize);
+	interrupt_enable();
+	return ptr;
+}
+unsigned acme_msize(void *ptr)//takes non-negligible time
+{
+	int idx=acme_blockidx(ptr);
+	if(idx==-1)
+		return 0;
+
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+
+	return blocks[idx].end-blocks[idx].start;
+}
+
+
 
 
 //intrernal OS header
@@ -199,17 +386,17 @@ typedef struct TaskContextStruct//64 bytes, 4-byte aligned
 	void *input;				//16
 	unsigned waketime;			//20
 	const char *name;			//24
-	unsigned short priority;	//28
-	TaskState state;			//30
-	unsigned char reserved;		//31
-	unsigned *hResource;
-	unsigned reserved2[31];
+	TaskState state;			//28
+
+	unsigned priority;			//32
+	unsigned *hResource;		//36
+	unsigned reserved2[6];		//40
 } TaskContext;
 extern volatile unsigned OS_tickCounter, OS_switchCounter;
 extern TaskContext *volatile OS_currentTask, *volatile OS_nextTask;
 void handler_PendSV(void);
 void handler_SysTick(void);
-unsigned char* OS_getStackPointer(void);
+unsigned char* OS_getStackPointer(void);//deprecated
 
 
 
@@ -241,22 +428,23 @@ void print_registers(void)//doesn't work
 }
 void panic(void);
 
-#define MEM_LIMIT (STACK_BYTESIZE)*(MAX_TASKS)
-__attribute__((aligned(32))) static unsigned char memory_tasks[MEM_LIMIT];//1024 bytes * 4 tasks = 4096 bytes
-static unsigned char *global_pointer=memory_tasks;
+//__attribute__((aligned(32))) static unsigned char memory_tasks[MEM_BYTES];//1024 bytes * 4 tasks = 4096 bytes
+//static unsigned char *global_pointer=memory_tasks;
 
-static TaskContext *taskHandles[MAX_TASKS];
+static TaskContext **taskHandles=0;
 static int ntasks=0;
 
 TaskContext *volatile OS_currentTask=0, *volatile OS_nextTask=0;
 
 static void (*OS_idleHook)(void)=0;
-TaskContext* OS_getCurrentTaskHandle(void)//use OS_currentTask instead
+TaskContext* OS_getCurrentTaskHandle(void)
 {
-	unsigned char *stackpointer=OS_getStackPointer();
-	int offset=stackpointer-memory_tasks;
-	offset&=~(STACK_BYTESIZE-1);
-	return (TaskContext*)(memory_tasks+offset);
+	return OS_currentTask;
+
+	//unsigned char *stackpointer=OS_getStackPointer();
+	//int offset=stackpointer-memory_tasks;
+	//offset&=~(STACK_BYTESIZE-1);
+	//return (TaskContext*)(memory_tasks+offset);
 }
 volatile unsigned OS_tickCounter=0, OS_switchCounter=0;
 void		OS_compateTasks(int *target, int test)
@@ -294,17 +482,6 @@ static TaskContext* OS_selectTask(void)
 				OS_compateTasks(&idx, i);
 			break;
 		}
-	/*	if(task->state==TASK_WAITING_ACQUIRE_SEM&&!task->hResource)
-			task->state=TASK_READY;
-		if(task->state==TASK_WAITING_RELEASE_SEM&&task->hResource)
-			task->state=TASK_READY;
-		if(task->state==TASK_WAITING&&OS_tickCounter>=task->waketime)//TODO: handle integer overflow
-			task->state=TASK_READY;
-		if(task->state==TASK_NEW||task->state==TASK_READY||task->state==TASK_RUNNING)
-		{
-			if(idx==-1||taskHandles[idx]->priority<task->priority)
-				idx=i;
-		}//*/
 	}
 	asm("cpsie i");
 	if(idx==-1)
@@ -352,18 +529,30 @@ static void OS_procCaller(void)
 		OS_sleepUntil(t);
 	}
 }
-void* OS_newTask(const char *name, int (*proc)(void*), void *param, unsigned short priority)
+void* OS_newTask(int (*proc)(void*), void *param, unsigned stacksize, unsigned short priority, const char *name)
 {
 	unsigned uninit_val=ntasks+1;
-	if(ntasks>=MAX_TASKS)
+
+	unsigned tasksize=sizeof(TaskContext)+stacksize;
+	TaskContext *task=(TaskContext*)malloc(tasksize, 32);
+	if(!task)
 		return 0;
-	if(global_pointer>=memory_tasks+MEM_LIMIT)
+
+	void *p2=realloc(taskHandles, (ntasks+1)*sizeof(void*), sizeof(void*));
+	if(!p2)
+	{
+		free(task);
 		return 0;
-	TaskContext *task=(TaskContext*)global_pointer;
+	}
+	taskHandles=(TaskContext**)p2;
+
 	memset(task, 0, sizeof(TaskContext));
-	task->sttop=(unsigned*)(global_pointer+STACK_BYTESIZE);
-	task->stbase=(unsigned*)(global_pointer+sizeof(TaskContext));
-	global_pointer+=STACK_BYTESIZE;
+	task->sttop=(unsigned*)((unsigned char*)task+tasksize);
+	task->stbase=(unsigned*)((unsigned char*)task+sizeof(TaskContext));
+
+	//task->sttop=(unsigned*)(global_pointer+STACK_BYTESIZE);
+	//task->stbase=(unsigned*)(global_pointer+sizeof(TaskContext));
+	//global_pointer+=STACK_BYTESIZE;
 	
 	task->proc=proc;
 	task->input=param;
@@ -404,6 +593,23 @@ void* OS_newTask(const char *name, int (*proc)(void*), void *param, unsigned sho
 		//*p=0x33221100;
 	return (void*)task;
 }
+void OS_deleteTask(void *hTask)
+{
+	int task_idx=-1;
+	if(!hTask)
+		hTask=OS_currentTask;
+	for(int k=0;k<ntasks;++k)
+	{
+		if(taskHandles[k]==hTask)
+		{
+			task_idx=k;
+			break;
+		}
+	}
+	memmove(taskHandles+task_idx, taskHandles+task_idx+1, (ntasks-(task_idx+1))*sizeof(void*));
+	free(hTask);
+	OS_switchContext();
+}
 void OS_startScheduler(int period, void (*idleHook)(void))
 {
 	OS_idleHook=idleHook;
@@ -416,12 +622,15 @@ void OS_startScheduler(int period, void (*idleHook)(void))
 	for(;;);
 }
 
-static unsigned memory_semaphores[MAX_SEMAPHORES];//1: not taken, 0: taken
+static unsigned *memory_semaphores=0;//1: not taken, 0: taken
 int			semaphore_count=0;
 void*		OS_createSemaphore()
 {
-	if(semaphore_count>=MAX_SEMAPHORES)
+	void *p2=realloc(memory_semaphores, (semaphore_count+1)*sizeof(unsigned), sizeof(unsigned));
+	if(!p2)
 		return 0;
+	memory_semaphores=(unsigned*)p2;
+	
 	memory_semaphores[semaphore_count]=0;//initiallly empty
 	++semaphore_count;
 	return memory_semaphores+semaphore_count-1;
@@ -519,7 +728,18 @@ void panic(void)
 {
 	panic_flag=1;
 	print_memory("__sys_stack:", __sys_stack, __sys_stack+COUNTOF(__sys_stack), 8);
-	print_memory("memory_tasks:", memory_tasks, memory_tasks+COUNTOF(memory_tasks), 8);
+
+	print_allocs();
+	print("Allocations:");
+	unsigned ceiling=HEAP_BYTES-nallocs*sizeof(MemBlock);
+	MemBlock *blocks=(MemBlock*)(memheap+ceiling);
+	for(int k=0;k<nallocs;++k)
+	{
+		print_idec(k);
+		print_memory(":\n", memheap+blocks[k].start, memheap+blocks[k].end, 8);
+	}
+	//print_memory("memory_tasks:", memory_tasks, memory_tasks+COUNTOF(memory_tasks), 8);
+
 	unsigned sp=(unsigned)OS_getStackPointer();
 	print_ihex(sp), print(" <- sp\n\n");
 }

@@ -4,13 +4,15 @@
 
 
 //https://www.ti.com/product/LM3S6965
+//https://www.ti.com/lit/ds/symlink/lm3s6965.pdf
 //page 16	list of registers
+//page 103	peripheral registers
 //page 185	system control registers
 //page 432	UART registers
-//page 103	peripheral registers
+//page 440	UART register map
 
-
-typedef struct SystemRegStruct//system control page 185
+//page 185 system control register map
+typedef struct SystemRegStruct
 {
 	unsigned DID0;		//Device identification 0
 	unsigned DID1;		//Device identification 0
@@ -51,6 +53,8 @@ typedef struct SystemRegStruct//system control page 185
 	unsigned reserved8[6];
 	unsigned DSLPCLKCFG;	//Deep sleep clock configuration
 } SystemReg;
+
+//page 440	UART register map
 typedef struct UARTRegStruct
 {
 	unsigned UARTDR;		//data
@@ -80,7 +84,7 @@ typedef struct UARTRegStruct
 	unsigned UARTPCellD3;	//primecell identification 3
 } UARTReg;
 
-//page 103
+//page 103 peripheral registers
 typedef struct PeriphRegStruct
 {
 	unsigned reserved0[4];
@@ -154,6 +158,7 @@ extern volatile UARTReg *const UART1;
 extern volatile UARTReg *const UART2;
 void uart_init();
 void uart_putc(char c);
+char uart_getc(void);
 void systick_init(int period);
 #define PendSV_setPriority(PRIORITY)	(periph->SYSPRI3&=0xFF1FFFFF, periph->SYSPRI3|=(PRIORITY)<<21)
 #define PendSV_trigger()	(periph->INTCTRL|=1<<28)
@@ -185,6 +190,11 @@ void uart_putc(char c)
 {
 	while(UART0->UARTFR&0x20);
 	UART0->UARTDR=c;
+}
+char uart_getc(void)
+{
+	while(!(UART0->UARTFR&0x40));
+	return UART0->UARTDR&0xFF;
 }
 void systick_init(int period)
 {
