@@ -156,7 +156,7 @@ extern volatile PeriphReg *const periph;
 extern volatile UARTReg *const UART0;
 extern volatile UARTReg *const UART1;
 extern volatile UARTReg *const UART2;
-void uart_init();
+void uart_init(unsigned clk, unsigned baudrate);
 void uart_putc(char c);
 char uart_getc(void);
 void systick_init(int period);
@@ -172,15 +172,19 @@ volatile PeriphReg *const periph=(volatile PeriphReg*)0xE000E000;
 volatile UARTReg *const UART0=(volatile UARTReg*)0x4000C000;
 volatile UARTReg *const UART1=(volatile UARTReg*)0x4000D000;
 volatile UARTReg *const UART2=(volatile UARTReg*)0x4000E000;
-void uart_init()
+void uart_init(unsigned clk, unsigned baudrate)
 {
+	unsigned BRD;
+
 	//https://www.ti.com/lit/ds/symlink/lm3s6965.pdf
 	//UART init page 439
 	system->RCGC1|=1;//enable UART0 clock
 	UART0->UARTCTL&=~1u;//disable UART0 page 454
 
 	//baud int & frac parts
-	UART0->UARTIBRD=104, UART0->UARTFBRD=11;//9600
+	BRD=((clk<<2)+(baudrate>>1))/baudrate;
+	UART0->UARTIBRD=BRD>>6, UART0->UARTFBRD=BRD&63;
+	//UART0->UARTIBRD=104, UART0->UARTFBRD=11;//9600
 	//UART0->UARTIBRD=10, UART0->UARTFBRD=54;//115200
 
 	UART0->UARTLCRH=0x00000060;//{SPS=0, WLEN=0b11, FEN=0, STP2=0, EPS=0, PEN=0, BRK=0} page 451

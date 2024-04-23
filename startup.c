@@ -91,7 +91,7 @@ void handler_Reset(void)
 #endif
 	//asm("LDR sp, =__stack_top");
 #endif
-	uart_init();
+	uart_init(50000000, 9600);
 	int ret=main();
 	print("Main returned ");
 	print_ihex(ret);
